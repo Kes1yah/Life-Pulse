@@ -7,6 +7,19 @@ A Raspberry Pi 5 based system for:
 
 Author: Embedded Systems Implementation
 Hardware: Raspberry Pi 5 with radar sensor, MPU-6050, 5" touchscreen
+
+Features:
+  - Real-time signal processing with FFT
+  - Survivor detection with photo display
+  - Missing persons database integration
+  - "FOUND" status tracking
+
+Hardware Integration Note:
+--------------------------
+This code uses Mock sensor classes for testing. To integrate with real hardware:
+1. Replace MockRadarSensor with actual radar interface (SPI/I2C/Serial)
+2. Replace MockVibrationSensor with MPU-6050 I2C driver
+3. Replace MockCamera with picamera2 or OpenCV camera capture
 """
 
 import numpy as np
@@ -14,6 +27,7 @@ from scipy import signal
 from scipy.fft import fft, fftfreq
 import threading
 import time
+import os
 from enum import Enum
 from dataclasses import dataclass
 from typing import Tuple, Optional
@@ -21,11 +35,17 @@ import queue
 
 # GUI imports
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import matplotlib.animation as animation
+from PIL import Image, ImageTk
+
+# Local imports
+from database import DisasterDatabase, MissingPerson, WebcamCamera
+import pickle
+import cv2
+import numpy as np
 
 
 # =============================================================================
@@ -42,6 +62,8 @@ class DetectionStatus(Enum):
     """Detection status states"""
     IDLE = "IDLE"
     SEARCHING = "SEARCHING"
+    IDENTIFYING = "IDENTIFYING"
+    MATCH_FOUND = "MATCH_FOUND"
     SURVIVOR_DETECTED = "SURVIVOR_DETECTED"
     COLLAPSE_WARNING = "COLLAPSE_WARNING"
 
@@ -66,10 +88,14 @@ class SystemConfig:
     # Signal processing
     noise_amplitude: float = 0.5        # Base noise level
     signal_amplitude: float = 1.0       # Signal amplitude
+    
+    # Paths
+    assets_dir: str = "assets"
+    db_path: str = "life_pulse.db"
 
 
 # =============================================================================
-# MOCK SENSOR CLASSES
+# MOCK SENSOR CLASSES (Replace with hardware drivers for production)
 # =============================================================================
 
 class MockRadarSensor:
@@ -79,6 +105,33 @@ class MockRadarSensor:
     Generates a noisy sine wave with optional target injection:
     - In SEARCH mode: Injects 1.2Hz sine wave (simulated heartbeat)
     - In SENTRY mode: Injects random high-amplitude spikes (structural shift)
+    
+    Hardware Integration:
+    --------------------
+    Replace this class with actual radar sensor driver:
+    - For SPI radar: Use spidev library
+    - For serial radar: Use pyserial
+    - For I2C radar: Use smbus2 or board/busio
+    
+    Example:
+    ```python
+    import spidev
+    
+    class RealRadarSensor:
+        def __init__(self, config):
+            self.spi = spidev.SpiDev()
+            self.spi.open(0, 0)  # Bus 0, Device 0
+            self.spi.max_speed_hz = 1000000
+            
+        def read_samples(self, num_samples):
+            # Read from actual ADC
+            data = []
+            for _ in range(num_samples):
+                raw = self.spi.xfer2([0x00, 0x00])
+                value = ((raw[0] & 0x0F) << 8) | raw[1]
+                data.append(value / 4096.0)  # Normalize
+            return np.array(data)
+    ```
     """
     
     def __init__(self, config: SystemConfig):
@@ -153,6 +206,35 @@ class MockVibrationSensor:
     Mock MPU-6050 Vibration Sensor.
     
     Simulates accelerometer readings with noise filtering capability.
+    
+    Hardware Integration:
+    --------------------
+    Replace with actual MPU-6050 driver:
+    ```python
+    import smbus2
+    
+    class RealVibrationSensor:
+        MPU6050_ADDR = 0x68
+        ACCEL_XOUT_H = 0x3B
+        
+        def __init__(self, config):
+            self.bus = smbus2.SMBus(1)  # I2C bus 1
+            # Wake up MPU-6050
+            self.bus.write_byte_data(self.MPU6050_ADDR, 0x6B, 0)
+            
+        def read_acceleration(self, num_samples):
+            x_data, y_data, z_data = [], [], []
+            for _ in range(num_samples):
+                data = self.bus.read_i2c_block_data(self.MPU6050_ADDR, self.ACCEL_XOUT_H, 6)
+                x = (data[0] << 8) | data[1]
+                y = (data[2] << 8) | data[3]
+                z = (data[4] << 8) | data[5]
+                # Convert to G-force
+                x_data.append(x / 16384.0)
+                y_data.append(y / 16384.0)
+                z_data.append(z / 16384.0)
+            return np.array(x_data), np.array(y_data), np.array(z_data)
+    ```
     """
     
     def __init__(self, config: SystemConfig):
@@ -439,6 +521,9 @@ class LifePulseGUI:
     - Real-time signal visualization
     - Status panel with detection indicators
     - Mode switching (Search/Sentry)
+    - Survivor photo and details display
+    - Database integration for missing persons
+    - "FOUND" status tracking with green indicator
     - Dark theme interface
     """
     
@@ -449,21 +534,28 @@ class LifePulseGUI:
         'bg_light': '#0f3460',
         'accent': '#e94560',
         'success': '#00ff88',
+        'success_dark': '#00aa55',
         'warning': '#ffaa00',
         'danger': '#ff4444',
         'text': '#ffffff',
         'text_dim': '#888888',
         'graph_line': '#00ffff',
-        'graph_grid': '#333355'
+        'graph_grid': '#333355',
+        'found_green': '#00ff00',
+        'found_glow': '#66ff66'
     }
     
     def __init__(self):
         self.config = SystemConfig()
         
+        # Initialize database
+        self.database = DisasterDatabase(self.config.db_path)
+        
         # Initialize sensors
         self.radar_sensor = MockRadarSensor(self.config)
         self.vibration_sensor = MockVibrationSensor(self.config)
         self.signal_processor = SignalProcessor(self.config)
+        self.camera = WebcamCamera(self.config.assets_dir)
         
         # Data queues for thread communication
         self.data_queue = queue.Queue(maxsize=10)
@@ -482,11 +574,15 @@ class LifePulseGUI:
         self.current_mode = OperationMode.SEARCH
         self.current_status = DetectionStatus.SEARCHING
         self.signal_buffer = np.zeros(self.config.buffer_size * 4)
+        self.current_person: Optional[MissingPerson] = None
+        self.survivor_detected = False
+        self.identifying_in_progress = False
+        self.photo_image = None  # Keep reference to prevent garbage collection
         
         # Create main window
         self.root = tk.Tk()
         self.root.title("Life-Pulse v2.0 - Disaster Recovery System")
-        self.root.geometry("1024x600")
+        self.root.geometry("1280x720")
         self.root.configure(bg=self.COLORS['bg_dark'])
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
@@ -495,6 +591,7 @@ class LifePulseGUI:
         self.root.grid_columnconfigure(0, weight=1)
         
         self._create_widgets()
+        self._load_next_missing_person()
         self._start_acquisition()
         
     def _create_widgets(self):
@@ -506,7 +603,31 @@ class LifePulseGUI:
         main_frame.grid_columnconfigure(0, weight=1)
         
         # === Header Panel ===
-        header_frame = tk.Frame(main_frame, bg=self.COLORS['bg_medium'], height=80)
+        self._create_header(main_frame)
+        
+        # === Main Content Area ===
+        content_frame = tk.Frame(main_frame, bg=self.COLORS['bg_dark'])
+        content_frame.grid(row=1, column=0, sticky="nsew")
+        content_frame.grid_rowconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(0, weight=2)  # Graph
+        content_frame.grid_columnconfigure(1, weight=1)  # Person details
+        content_frame.grid_columnconfigure(2, weight=1)  # Status
+        
+        # === Graph Panel (Left) ===
+        self._create_graph_panel(content_frame)
+        
+        # === Person Details Panel (Center) ===
+        self._create_person_panel(content_frame)
+        
+        # === Status Panel (Right) ===
+        self._create_status_panel(content_frame)
+        
+        # === Footer ===
+        self._create_footer(main_frame)
+        
+    def _create_header(self, parent):
+        """Create header panel"""
+        header_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'], height=80)
         header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         header_frame.grid_propagate(False)
         header_frame.grid_columnconfigure(1, weight=1)
@@ -531,6 +652,17 @@ class LifePulseGUI:
         )
         subtitle.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
         
+        # Database stats
+        stats = self.database.get_statistics()
+        self.stats_label = tk.Label(
+            header_frame,
+            text=f"Missing: {stats['missing']} | Found: {stats['found']}",
+            font=("Helvetica", 11),
+            fg=self.COLORS['warning'],
+            bg=self.COLORS['bg_medium']
+        )
+        self.stats_label.grid(row=0, column=1, rowspan=2, padx=20)
+        
         # Mode indicator
         self.mode_indicator = tk.Label(
             header_frame,
@@ -543,21 +675,15 @@ class LifePulseGUI:
         )
         self.mode_indicator.grid(row=0, column=2, rowspan=2, padx=20, pady=10)
         
-        # === Main Content Area ===
-        content_frame = tk.Frame(main_frame, bg=self.COLORS['bg_dark'])
-        content_frame.grid(row=1, column=0, sticky="nsew")
-        content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=3)
-        content_frame.grid_columnconfigure(1, weight=1)
-        
-        # === Graph Panel (Left) ===
-        graph_frame = tk.Frame(content_frame, bg=self.COLORS['bg_medium'])
+    def _create_graph_panel(self, parent):
+        """Create graph panel"""
+        graph_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
         graph_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         graph_frame.grid_rowconfigure(0, weight=1)
         graph_frame.grid_columnconfigure(0, weight=1)
         
         # Create matplotlib figure
-        self.fig = Figure(figsize=(8, 4), dpi=100, facecolor=self.COLORS['bg_medium'])
+        self.fig = Figure(figsize=(6, 4), dpi=100, facecolor=self.COLORS['bg_medium'])
         self.ax = self.fig.add_subplot(111)
         self._style_plot()
         
@@ -568,19 +694,119 @@ class LifePulseGUI:
         # Initialize plot line
         self.line, = self.ax.plot([], [], color=self.COLORS['graph_line'], linewidth=1)
         
-        # === Status Panel (Right) ===
-        status_frame = tk.Frame(content_frame, bg=self.COLORS['bg_medium'])
-        status_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+    def _create_person_panel(self, parent):
+        """Create person details panel with photo"""
+        person_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
+        person_frame.grid(row=0, column=1, sticky="nsew", padx=5)
+        
+        # Title
+        tk.Label(
+            person_frame,
+            text="SURVIVOR IDENTIFICATION",
+            font=("Helvetica", 12, "bold"),
+            fg=self.COLORS['text'],
+            bg=self.COLORS['bg_medium']
+        ).pack(pady=(15, 10))
+        
+        # Photo frame
+        photo_container = tk.Frame(person_frame, bg=self.COLORS['bg_light'], padx=5, pady=5)
+        photo_container.pack(padx=10, pady=5)
+        
+        self.photo_label = tk.Label(
+            photo_container,
+            text="No Photo",
+            font=("Helvetica", 10),
+            fg=self.COLORS['text_dim'],
+            bg=self.COLORS['bg_dark'],
+            width=15,
+            height=8
+        )
+        self.photo_label.pack()
+        
+        # Person details frame
+        details_frame = tk.Frame(person_frame, bg=self.COLORS['bg_medium'])
+        details_frame.pack(padx=10, pady=10, fill="x")
+        
+        # Name
+        self.name_label = tk.Label(
+            details_frame,
+            text="Name: --",
+            font=("Helvetica", 14, "bold"),
+            fg=self.COLORS['text'],
+            bg=self.COLORS['bg_medium'],
+            anchor="center"
+        )
+        self.name_label.pack(fill="x", pady=10)
+        
+        # Status indicator
+        self.person_status_label = tk.Label(
+            details_frame,
+            text="STATUS: MISSING",
+            font=("Helvetica", 11, "bold"),
+            fg=self.COLORS['danger'],
+            bg=self.COLORS['bg_medium'],
+            anchor="center"
+        )
+        self.person_status_label.pack(fill="x", pady=(0, 5))
+        
+        # === FOUND Button (Green Light Indicator) ===
+        self.found_button = tk.Button(
+            person_frame,
+            text="✓ MARK AS FOUND",
+            font=("Helvetica", 14, "bold"),
+            fg=self.COLORS['bg_dark'],
+            bg=self.COLORS['text_dim'],
+            activebackground=self.COLORS['found_green'],
+            activeforeground=self.COLORS['bg_dark'],
+            relief="flat",
+            command=self.mark_as_found,
+            width=18,
+            height=2,
+            state="disabled"
+        )
+        self.found_button.pack(pady=15)
+        
+        # Next person button
+        self.next_button = tk.Button(
+            person_frame,
+            text="NEXT PERSON ▶",
+            font=("Helvetica", 10),
+            fg=self.COLORS['text'],
+            bg=self.COLORS['bg_light'],
+            activebackground=self.COLORS['accent'],
+            relief="flat",
+            command=self._load_next_missing_person,
+            width=15
+        )
+        self.next_button.pack(pady=5)
+        
+        # Enrollment button
+        self.enroll_button = tk.Button(
+            person_frame,
+            text="👤 ENROLL SURVIVOR",
+            font=("Helvetica", 10, "bold"),
+            fg=self.COLORS['bg_dark'],
+            bg=self.COLORS['warning'],
+            activebackground=self.COLORS['accent'],
+            relief="flat",
+            command=self._enroll_faces_dialog,
+            width=18
+        )
+        self.enroll_button.pack(pady=(20, 5))
+        
+    def _create_status_panel(self, parent):
+        """Create status panel"""
+        status_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
+        status_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         
         # Status title
-        status_title = tk.Label(
+        tk.Label(
             status_frame,
             text="SYSTEM STATUS",
             font=("Helvetica", 12, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_medium']
-        )
-        status_title.pack(pady=(20, 10))
+        ).pack(pady=(20, 10))
         
         # Main status display
         self.status_display = tk.Label(
@@ -589,10 +815,10 @@ class LifePulseGUI:
             font=("Helvetica", 16, "bold"),
             fg=self.COLORS['warning'],
             bg=self.COLORS['bg_dark'],
-            wraplength=200,
+            wraplength=180,
             justify="center",
-            padx=20,
-            pady=30
+            padx=15,
+            pady=25
         )
         self.status_display.pack(padx=10, pady=10, fill="x")
         
@@ -611,7 +837,7 @@ class LifePulseGUI:
         self.freq_display = tk.Label(
             freq_frame,
             text="-- Hz",
-            font=("Helvetica", 20, "bold"),
+            font=("Helvetica", 18, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_medium']
         )
@@ -632,28 +858,28 @@ class LifePulseGUI:
         self.mag_display = tk.Label(
             mag_frame,
             text="--",
-            font=("Helvetica", 20, "bold"),
+            font=("Helvetica", 18, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_medium']
         )
         self.mag_display.pack()
         
         # Separator
-        ttk.Separator(status_frame, orient="horizontal").pack(fill="x", padx=10, pady=20)
+        ttk.Separator(status_frame, orient="horizontal").pack(fill="x", padx=10, pady=15)
         
         # Mode toggle button
         self.mode_button = tk.Button(
             status_frame,
             text="SWITCH TO\nSENTRY MODE",
-            font=("Helvetica", 12, "bold"),
+            font=("Helvetica", 11, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_light'],
             activebackground=self.COLORS['accent'],
             activeforeground=self.COLORS['text'],
             relief="flat",
             command=self.toggle_mode,
-            width=15,
-            height=3
+            width=14,
+            height=2
         )
         self.mode_button.pack(padx=10, pady=10)
         
@@ -673,13 +899,26 @@ class LifePulseGUI:
         )
         self.target_check.pack(pady=10)
         
-        # === Footer ===
-        footer_frame = tk.Frame(main_frame, bg=self.COLORS['bg_dark'], height=30)
+        # Reset database button (for testing)
+        reset_btn = tk.Button(
+            status_frame,
+            text="Reset All to Missing",
+            font=("Helvetica", 9),
+            fg=self.COLORS['text_dim'],
+            bg=self.COLORS['bg_dark'],
+            relief="flat",
+            command=self._reset_database
+        )
+        reset_btn.pack(pady=5)
+        
+    def _create_footer(self, parent):
+        """Create footer panel"""
+        footer_frame = tk.Frame(parent, bg=self.COLORS['bg_dark'], height=30)
         footer_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         
         footer_label = tk.Label(
             footer_frame,
-            text="Life-Pulse v2.0 | Raspberry Pi 5 | Mock Sensor Mode",
+            text="Life-Pulse v2.0 | Raspberry Pi 5 | Mock Sensor Mode | SQLite Database",
             font=("Helvetica", 8),
             fg=self.COLORS['text_dim'],
             bg=self.COLORS['bg_dark']
@@ -700,6 +939,112 @@ class LifePulseGUI:
         self.ax.grid(True, color=self.COLORS['graph_grid'], alpha=0.3, linestyle='--')
         self.ax.set_xlim(0, self.config.buffer_size * 4)
         self.ax.set_ylim(-5, 5)
+        
+    def _load_photo(self, photo_path: str):
+        """Load and display person photo"""
+        try:
+            if os.path.exists(photo_path):
+                img = Image.open(photo_path)
+                img = img.resize((120, 120), Image.Resampling.LANCZOS)
+                self.photo_image = ImageTk.PhotoImage(img)
+                self.photo_label.configure(image=self.photo_image, text="", width=120, height=120)
+            else:
+                self.photo_label.configure(image="", text="No Photo", width=15, height=8)
+                self.photo_image = None
+        except Exception as e:
+            print(f"Error loading photo: {e}")
+            self.photo_label.configure(image="", text="Photo Error", width=15, height=8)
+            self.photo_image = None
+            
+    def _load_next_missing_person(self):
+        """Load next missing person from database (Cycling display)"""
+        current_id = self.current_person.id if self.current_person else 0
+        self.current_person = self.database.get_next_missing(current_id)
+        
+        if self.current_person:
+            # Update UI with person name
+            self.name_label.configure(text=f"Name: {self.current_person.name}")
+            self.person_status_label.configure(text="STATUS: MISSING", fg=self.COLORS['danger'])
+            
+            # Load photo (if it exists)
+            self._load_photo(self.current_person.photo_path)
+            
+            # Reset found button state
+            self.found_button.configure(
+                state="disabled",
+                bg=self.COLORS['text_dim'],
+                fg=self.COLORS['bg_dark']
+            )
+        else:
+            # No more missing persons
+            self.name_label.configure(text="Name: All Found!")
+            self.person_status_label.configure(text="ALL CLEAR", fg=self.COLORS['success'])
+            self.photo_label.configure(image="", text="✓", width=15, height=8)
+            self.photo_image = None
+            
+        self._update_stats()
+        
+    def _update_stats(self):
+        """Update database statistics display"""
+        stats = self.database.get_statistics()
+        self.stats_label.configure(text=f"Missing: {stats['missing']} | Found: {stats['found']}")
+        
+    def _reset_database(self):
+        """Reset all persons to missing status (for testing)"""
+        self.database.reset_all_to_missing()
+        self.current_person = None
+        self._load_next_missing_person()
+        messagebox.showinfo("Reset Complete", "All persons reset to MISSING status.")
+        
+    def mark_as_found(self):
+        """Mark current person as found in database"""
+        if self.current_person:
+            success = self.database.mark_as_found(
+                self.current_person.id,
+                "Located by Life-Pulse radar system"
+            )
+            
+            if success:
+                # Update UI
+                self.person_status_label.configure(text="STATUS: FOUND ✓", fg=self.COLORS['found_green'])
+                self.found_button.configure(
+                    text="✓ MARKED FOUND",
+                    state="disabled",
+                    bg=self.COLORS['success_dark']
+                )
+                
+                # Flash green effect
+                self._flash_found_indicator()
+                
+                # Show confirmation
+                messagebox.showinfo(
+                    "Survivor Located",
+                    f"{self.current_person.name} has been marked as FOUND!\n\n"
+                    "The central registry has been updated."
+                )
+                
+                # Load next person after short delay
+                self.root.after(1000, self._load_next_missing_person)
+                
+            self._update_stats()
+            
+    def _flash_found_indicator(self):
+        """Flash green indicator for found status"""
+        original_bg = self.root.cget('bg')
+        
+        def flash(count=0):
+            if count < 6:
+                if count % 2 == 0:
+                    self.root.configure(bg=self.COLORS['found_green'])
+                    self.found_button.configure(bg=self.COLORS['found_glow'])
+                else:
+                    self.root.configure(bg=original_bg)
+                    self.found_button.configure(bg=self.COLORS['success_dark'])
+                self.root.after(150, lambda: flash(count + 1))
+            else:
+                self.root.configure(bg=original_bg)
+                
+        flash()
         
     def toggle_mode(self):
         """Toggle between Search and Sentry modes"""
@@ -762,24 +1107,23 @@ class LifePulseGUI:
     def _update_status(self, result: dict):
         """Update status displays based on detection results"""
         if result['mode'] == OperationMode.SEARCH:
-            # Update frequency display
+            # Check for heartbeat/respiration detection
             if result['detected']:
+                if not self.survivor_detected and not self.identifying_in_progress:
+                    # New detection! Trigger staged identification flow
+                    self._start_staged_identification()
+                
+                # Update realtime displays
                 self.freq_display.configure(text=f"{result['frequency']:.2f} Hz")
                 self.mag_display.configure(text=f"{result['magnitude']:.3f}")
-                self.status_display.configure(
-                    text="🚨 SURVIVOR\nDETECTED!",
-                    fg=self.COLORS['success']
-                )
-                self.current_status = DetectionStatus.SURVIVOR_DETECTED
             else:
-                self.freq_display.configure(text="-- Hz")
-                self.mag_display.configure(text=f"{result['magnitude']:.3f}")
-                self.status_display.configure(
-                    text="SEARCHING...",
-                    fg=self.COLORS['warning']
-                )
-                self.current_status = DetectionStatus.SEARCHING
-                
+                # Signal lost
+                if not self.identifying_in_progress:
+                    self.survivor_detected = False
+                    self.freq_display.configure(text="-- Hz")
+                    self.mag_display.configure(text=f"{result['magnitude']:.3f}")
+                    self._reset_identification_ui()
+                    
         else:  # SENTRY mode
             self.mag_display.configure(text=f"{result['magnitude']:.3f}")
             if result['alarm']:
@@ -796,6 +1140,170 @@ class LifePulseGUI:
                     text="MONITORING...\nStable",
                     fg=self.COLORS['success']
                 )
+
+    def _start_staged_identification(self):
+        """Stage 1: Survivor Detected & Image Capture"""
+        self.survivor_detected = True
+        self.identifying_in_progress = True
+        self.current_status = DetectionStatus.SURVIVOR_DETECTED
+        
+        self.status_display.configure(
+            text="🚨 SURVIVOR DETECTED!\nCAPTURING IMAGE...",
+            fg=self.COLORS['accent']
+        )
+        
+        # Trigger "Hardware" capture
+        captured_path = self.camera.capture()
+        
+        if captured_path:
+            # Move to Stage 2 after short delay
+            # During this delay, we could do more processing if needed
+            self.root.after(3000, lambda: self._identifying_phase(captured_path))
+        else:
+            self.status_display.configure(
+                text="❌ CAMERA ERROR\nCHECK HARDWARE",
+                fg=self.COLORS['danger']
+            )
+            self.identifying_in_progress = False
+
+    def _identifying_phase(self, photo_path: str):
+        """Stage 2: Analysis / Cross-Verification"""
+        self.current_status = DetectionStatus.IDENTIFYING
+        
+        self.status_display.configure(
+            text="🔍 DETECTING...\nCROSS-VERIFYING...",
+            fg=self.COLORS['warning']
+        )
+        
+        # Simulated "Analysis" delay (3 seconds)
+        # In real life, this is where face-recognition algorithms would run
+        self.root.after(3000, lambda: self._complete_identification(photo_path))
+
+    def _complete_identification(self, photo_path: str):
+        """Stage 3: Match Found & Display"""
+        if not self.survivor_detected: # Check if signal still present
+            self.identifying_in_progress = False
+            self._reset_identification_ui()
+            return
+            
+        # Map captured photo to database record using face-recognition
+        matched_person = self._find_face_match(photo_path)
+        
+        if matched_person:
+            self.current_person = matched_person
+            self.current_status = DetectionStatus.MATCH_FOUND
+            
+            # Update GUI with matched name
+            self.name_label.configure(text=f"Name: {matched_person.name}")
+            self.person_status_label.configure(text="STATUS: FOUND (MATCHED)", fg=self.COLORS['found_green'])
+            
+            # Show photo
+            self._load_photo(photo_path) # Show the live capture
+            
+            # Update main status display
+            self.status_display.configure(
+                text=f"✅ MATCH FOUND!\n{matched_person.name}",
+                fg=self.COLORS['success']
+            )
+            
+            # Enable FOUND button
+            self.found_button.configure(
+                state="normal",
+                bg=self.COLORS['found_green'],
+                fg=self.COLORS['bg_dark']
+            )
+            
+            # Mark in DB automatically
+            self.database.mark_as_found(matched_person.id, f"Automatically identified via webcam at {time.ctime()}")
+            self._update_stats()
+        else:
+            self.status_display.configure(
+                text="❌ UNKNOWN SURVIVOR\nNO MATCH FOUND",
+                fg=self.COLORS['danger']
+            )
+            self._load_photo(photo_path) # Show the captured image anyway
+            
+        self.identifying_in_progress = False
+
+    def _find_face_match(self, captured_photo_path: str) -> Optional[MissingPerson]:
+        """Perform real face recognition matching against the database using OpenCV LBPH"""
+        try:
+            # Create recognizer and load data
+            recognizer = cv2.face.LBPHFaceRecognizer_create()
+            
+            # Get all persons with their multiple encodings
+            entries = self.database.get_all_with_encodings()
+            if not entries:
+                return None
+                
+            faces = []
+            labels = []
+            id_map = {} # Internal ID to Person mapping
+            
+            label_idx = 0
+            for entry in entries:
+                person = entry['person']
+                encodings = entry['encodings']
+                
+                for encoding_blob in encodings:
+                    # Encoding is the face image bytes for LBPH
+                    nparr = np.frombuffer(encoding_blob, np.uint8)
+                    face_img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+                    if face_img is not None:
+                        faces.append(face_img)
+                        labels.append(label_idx)
+                        id_map[label_idx] = person
+                
+                label_idx += 1
+            
+            if not faces:
+                return None
+                
+            recognizer.train(faces, np.array(labels))
+            
+            # Detect face in capture
+            captured_img = cv2.imread(captured_photo_path)
+            gray = cv2.cvtColor(captured_img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray) # Better contrast
+            
+            # Stricter face detection
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            detected_faces = face_cascade.detectMultiScale(gray, 1.1, 6)
+            
+            if len(detected_faces) == 0:
+                print("DEBUG RECOGNITION: No face detected in capture.")
+                return None
+                
+            x, y, w, h = detected_faces[0]
+            roi_gray = gray[y:y+h, x:x+w]
+            roi_gray = cv2.resize(roi_gray, (200, 200)) # Standardize size
+            
+            label_id, confidence = recognizer.predict(roi_gray)
+            matched_person = id_map.get(label_id)
+            name = matched_person.name if matched_person else "UNKNOWN"
+            
+            print(f"DEBUG RECOGNITION: Matched {name} with confidence (distance): {confidence:.2f}")
+            
+            # Confidence for LBPH is distance (lower is better)
+            # 100 is generally a safe upper bound for a positive match in varied lighting
+            if confidence < 100: 
+                return matched_person
+                
+            return None
+            
+        except Exception as e:
+            print(f"Recognition Error: {e}")
+            return None
+
+    def _reset_identification_ui(self):
+        """Clear the identification panel when no survivor is detected"""
+        if not self.identifying_in_progress:
+            self.status_display.configure(text="SEARCHING...", fg=self.COLORS['warning'])
+            self.name_label.configure(text="Name: --")
+            self.person_status_label.configure(text="STATUS: MISSING", fg=self.COLORS['danger'])
+            self.photo_label.configure(image="", text="No Photo", width=15, height=8)
+            self.photo_image = None
+            self.found_button.configure(state="disabled", bg=self.COLORS['text_dim'])
                 
     def on_closing(self):
         """Handle window close event"""
@@ -812,23 +1320,115 @@ class LifePulseGUI:
 # MAIN ENTRY POINT
 # =============================================================================
 
+    def app_run(self):
+        """Run the main event loop"""
+        self.root.mainloop()
+
+    def _enroll_faces_dialog(self):
+        """Show dialog to enroll faces for names in the database"""
+        enroll_win = tk.Toplevel(self.root)
+        enroll_win.title("Survivor Face Enrollment")
+        enroll_win.geometry("400x300")
+        enroll_win.configure(bg=self.COLORS['bg_medium'])
+        
+        tk.Label(
+            enroll_win, 
+            text="Enroll Face for Survivor",
+            font=("Helvetica", 12, "bold"),
+            bg=self.COLORS['bg_medium'],
+            fg=self.COLORS['text']
+        ).pack(pady=10)
+        
+        tk.Label(
+            enroll_win,
+            text="Select name and look at webcam:",
+            bg=self.COLORS['bg_medium'],
+            fg=self.COLORS['text_dim']
+        ).pack()
+        
+        # Get missing persons
+        missing = self.database.get_all_missing()
+        if not missing:
+            tk.Label(enroll_win, text="No survivors to enroll!", fg=self.COLORS['danger']).pack()
+            return
+
+        name_var = tk.StringVar(enroll_win)
+        name_var.set(missing[0].name if missing else "")
+        
+        dropdown = ttk.Combobox(enroll_win, textvariable=name_var, state="readonly")
+        dropdown['values'] = [p.name for p in missing]
+        dropdown.pack(pady=20)
+
+        def do_capture():
+            selected_name = name_var.get()
+            person = next((p for p in missing if p.name == selected_name), None)
+            
+            if person:
+                self.status_display.configure(text="CAPTURING...", fg=self.COLORS['accent'])
+                
+                # Take photo
+                save_path = os.path.join(self.config.assets_dir, f"ref_{person.name.lower()}_{int(time.time())}.png")
+                photo_path = self.camera.capture(save_path)
+                
+                if photo_path:
+                    try:
+                        # Extract Face ROI for LBPH
+                        img = cv2.imread(photo_path)
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        gray = cv2.equalizeHist(gray) # Standardize contrast
+                        
+                        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                        detected_faces = face_cascade.detectMultiScale(gray, 1.1, 6)
+                        
+                        if len(detected_faces) > 0:
+                            x, y, w, h = detected_faces[0]
+                            roi_gray = gray[y:y+h, x:x+w]
+                            roi_gray = cv2.resize(roi_gray, (200, 200)) # Standardize
+                            
+                            # Encode to bytes
+                            _, buffer = cv2.imencode('.png', roi_gray)
+                            encoding_blob = buffer.tobytes()
+                            
+                            # Save to DB
+                            self.database.update_face_encoding(person.id, encoding_blob, photo_path)
+                            messagebox.showinfo("Success", f"Face enrolled for {person.name}!")
+                        else:
+                            messagebox.showerror("Error", "No face detected in capture. Please ensure clear lighting.")
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Enrollment Error: {e}")
+                
+                self.status_display.configure(text="SEARCHING...", fg=self.COLORS['warning'])
+
+        tk.Button(
+            enroll_win,
+            text="📸 CAPTURE & ENROLL",
+            bg=self.COLORS['success'],
+            fg=self.COLORS['bg_dark'],
+            command=do_capture
+        ).pack(pady=20)
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
 def main():
     """Main entry point for Life-Pulse v2.0"""
     print("=" * 60)
     print("  LIFE-PULSE v2.0 - Disaster Recovery System")
     print("  Dual-Mode Radar: Search (Heartbeat) / Sentry (Structure)")
     print("=" * 60)
-    print("\nInitializing system...")
-    print("  - Mock sensors enabled (no hardware required)")
-    print("  - GUI launching...")
-    print("\nControls:")
-    print("  - Toggle 'Simulate Target' to inject test signals")
-    print("  - Switch modes with the mode button")
-    print("-" * 60)
+    print("\nInitializing system with Real Webcam + Face Recognition...")
+    
+    # Ensure Pillow is available
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        print("\nERROR: Pillow library required. Install with: pip install Pillow")
+        return
     
     app = LifePulseGUI()
-    app.run()
-
+    app.app_run()
 
 if __name__ == "__main__":
     main()
