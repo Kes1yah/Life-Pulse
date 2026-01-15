@@ -525,6 +525,7 @@ class LifePulseGUI:
     - Database integration for missing persons
     - "FOUND" status tracking with green indicator
     - Dark theme interface
+    - Device monitoring mode
     """
     
     # Color scheme (dark theme)
@@ -545,8 +546,10 @@ class LifePulseGUI:
         'found_glow': '#66ff66'
     }
     
-    def __init__(self):
+    def __init__(self, selected_device=None, parent_frame=None, launcher=None):
         self.config = SystemConfig()
+        self.selected_device = selected_device  # Device number (1-4)
+        self.launcher = launcher  # Reference to launcher for navigation
         
         # Initialize database
         self.database = DisasterDatabase(self.config.db_path)
@@ -579,16 +582,23 @@ class LifePulseGUI:
         self.identifying_in_progress = False
         self.photo_image = None  # Keep reference to prevent garbage collection
         
-        # Create main window
-        self.root = tk.Tk()
-        self.root.title("Life-Pulse v2.0 - Disaster Recovery System")
-        self.root.geometry("1280x720")
-        self.root.configure(bg=self.COLORS['bg_dark'])
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Make it responsive to touch/resize
-        self.root.grid_rowconfigure(0, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
+        # Use provided parent frame or create new root window
+        if parent_frame is not None:
+            self.parent_frame = parent_frame
+            self.root = parent_frame.winfo_toplevel()
+        else:
+            # Create main window (standalone mode)
+            self.root = tk.Tk()
+            self.root.title(f"Life-Pulse v2.0 - Device {selected_device} Monitoring" if selected_device else "Life-Pulse v2.0")
+            self.root.geometry("1280x720")
+            self.root.configure(bg=self.COLORS['bg_dark'])
+            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+            
+            # Make it responsive to touch/resize
+            self.root.grid_rowconfigure(0, weight=1)
+            self.root.grid_columnconfigure(0, weight=1)
+            
+            self.parent_frame = None
         
         self._create_widgets()
         self._load_next_missing_person()
@@ -597,8 +607,12 @@ class LifePulseGUI:
     def _create_widgets(self):
         """Create all GUI widgets"""
         # Main container
-        main_frame = tk.Frame(self.root, bg=self.COLORS['bg_dark'])
-        main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        if self.parent_frame is not None:
+            main_frame = self.parent_frame
+        else:
+            main_frame = tk.Frame(self.root, bg=self.COLORS['bg_dark'])
+            main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
         main_frame.grid_rowconfigure(1, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
         
@@ -609,12 +623,12 @@ class LifePulseGUI:
         content_frame = tk.Frame(main_frame, bg=self.COLORS['bg_dark'])
         content_frame.grid(row=1, column=0, sticky="nsew")
         content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=2)  # Graph
+        content_frame.grid_columnconfigure(0, weight=2)  # Image display
         content_frame.grid_columnconfigure(1, weight=1)  # Person details
         content_frame.grid_columnconfigure(2, weight=1)  # Status
         
-        # === Graph Panel (Left) ===
-        self._create_graph_panel(content_frame)
+        # === Image Display Panel (Left) ===
+        self._create_image_display_panel(content_frame)
         
         # === Person Details Panel (Center) ===
         self._create_person_panel(content_frame)
@@ -632,6 +646,22 @@ class LifePulseGUI:
         header_frame.grid_propagate(False)
         header_frame.grid_columnconfigure(1, weight=1)
         
+        # Back button (if launcher available)
+        if self.launcher:
+            back_button = tk.Button(
+                header_frame,
+                text="◀ BACK",
+                font=("Helvetica", 10, "bold"),
+                fg=self.COLORS['bg_dark'],
+                bg=self.COLORS['warning'],
+                activebackground=self.COLORS['accent'],
+                relief="flat",
+                command=self._go_back_to_devices,
+                padx=15,
+                pady=5
+            )
+            back_button.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
         # Title
         title_label = tk.Label(
             header_frame,
@@ -640,17 +670,18 @@ class LifePulseGUI:
             fg=self.COLORS['accent'],
             bg=self.COLORS['bg_medium']
         )
-        title_label.grid(row=0, column=0, padx=20, pady=10, sticky="w")
+        title_label.grid(row=0, column=1, padx=20, pady=10, sticky="w")
         
-        # Subtitle
+        # Subtitle with device info
+        device_info = f"Device {self.selected_device} Monitoring" if self.selected_device else "Disaster Recovery Radar"
         subtitle = tk.Label(
             header_frame,
-            text="Dual-Mode Disaster Recovery Radar System",
+            text=device_info,
             font=("Helvetica", 10),
             fg=self.COLORS['text_dim'],
             bg=self.COLORS['bg_medium']
         )
-        subtitle.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+        subtitle.grid(row=1, column=1, padx=20, pady=(0, 10), sticky="w")
         
         # Database stats
         stats = self.database.get_statistics()
@@ -674,6 +705,40 @@ class LifePulseGUI:
             pady=10
         )
         self.mode_indicator.grid(row=0, column=2, rowspan=2, padx=20, pady=10)
+        
+    def _create_image_display_panel(self, parent):
+        """Create image display panel for hardware-captured images"""
+        image_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
+        image_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        image_frame.grid_rowconfigure(0, weight=1)
+        image_frame.grid_columnconfigure(0, weight=1)
+        
+        # Title
+        title_label = tk.Label(
+            image_frame,
+            text="HARDWARE IMAGE FEED",
+            font=("Helvetica", 11, "bold"),
+            fg=self.COLORS['text'],
+            bg=self.COLORS['bg_medium'],
+            padx=10,
+            pady=5
+        )
+        title_label.pack(side=tk.TOP)
+        
+        # Image display area
+        image_container = tk.Frame(image_frame, bg=self.COLORS['bg_light'], relief=tk.SUNKEN, bd=2)
+        image_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.image_label = tk.Label(
+            image_container,
+            text="Waiting for hardware image...",
+            font=("Helvetica", 10),
+            fg=self.COLORS['text_dim'],
+            bg=self.COLORS['bg_light'],
+            width=40,
+            height=15
+        )
+        self.image_label.pack(fill=tk.BOTH, expand=True)
         
     def _create_graph_panel(self, parent):
         """Create graph panel"""
@@ -1074,24 +1139,9 @@ class LifePulseGUI:
     def _update_gui(self):
         """Update GUI with latest data (runs in main thread)"""
         try:
-            # Get latest signal data
+            # Get latest signal data (discard for now, we're not displaying graph)
             while not self.data_queue.empty():
                 new_data = self.data_queue.get_nowait()
-                # Shift buffer and append new data
-                self.signal_buffer = np.roll(self.signal_buffer, -len(new_data))
-                self.signal_buffer[-len(new_data):] = new_data
-                
-            # Update plot
-            x_data = np.arange(len(self.signal_buffer))
-            self.line.set_data(x_data, self.signal_buffer)
-            self.ax.set_xlim(0, len(self.signal_buffer))
-            
-            # Auto-scale Y axis based on data
-            data_range = np.max(np.abs(self.signal_buffer))
-            if data_range > 0:
-                self.ax.set_ylim(-data_range * 1.2, data_range * 1.2)
-            
-            self.canvas.draw_idle()
             
             # Get latest detection results
             while not self.result_queue.empty():
@@ -1305,11 +1355,29 @@ class LifePulseGUI:
             self.photo_image = None
             self.found_button.configure(state="disabled", bg=self.COLORS['text_dim'])
                 
+    def _go_back_to_devices(self):
+        """Go back to device selection screen"""
+        if self.launcher:
+            print("[APP] Going back to device selection...")
+            # Stop acquisition
+            self.acquisition_thread.stop()
+            time.sleep(0.2)
+            # Destroy all widgets in parent frame
+            if self.parent_frame:
+                for widget in self.parent_frame.winfo_children():
+                    widget.destroy()
+            # Show device selection
+            self.launcher._show_device_selection()
+        else:
+            # If no launcher, just close the window
+            self.on_closing()
+
     def on_closing(self):
         """Handle window close event"""
         self.acquisition_thread.stop()
         time.sleep(0.2)  # Give thread time to stop
-        self.root.destroy()
+        if not self.parent_frame:
+            self.root.destroy()
         
     def run(self):
         """Start the GUI main loop"""

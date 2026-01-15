@@ -8,9 +8,15 @@ cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
 print("Tables:", cursor.fetchall())
 
 # View missing_persons table
-cursor.execute("SELECT * FROM missing_persons;")
+print("\nMissing Persons:")
+cursor.execute("SELECT id, full_name, aadhar, phone_number, photo_path, status FROM missing_persons;")
 rows = cursor.fetchall()
 for row in rows:
-    print(row)
+    print(f"\nID: {row[0]}")
+    print(f"  Name: {row[1]}")
+    print(f"  Aadhar: {row[2]}")
+    print(f"  Phone: {row[3]}")
+    print(f"  Photo: {row[4] if row[4] else 'No photo'}")
+    print(f"  Status: '{row[5] if row[5] else '(empty)'}'")
 
 conn.close()

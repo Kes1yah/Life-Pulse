@@ -14,6 +14,7 @@ class MissingPerson:
     full_name: str
     aadhar: Optional[str] = None
     phone_number: Optional[str] = None
+    photo_path: Optional[str] = None
     status: str = ""  # Empty by default, updated only when found by hardware device
     found_timestamp: Optional[float] = None
 
@@ -47,6 +48,7 @@ class DisasterDatabase:
                     full_name TEXT NOT NULL,
                     aadhar TEXT,
                     phone_number TEXT,
+                    photo_path TEXT,
                     status TEXT DEFAULT '',
                     found_timestamp REAL
                 )
@@ -77,14 +79,14 @@ class DisasterDatabase:
             conn.commit()
             conn.close()
             
-    def add_person(self, full_name: str, aadhar: str = None, phone_number: str = None) -> int:
+    def add_person(self, full_name: str, aadhar: str = None, phone_number: str = None, photo_path: str = None) -> int:
         """Add a new person to the missing list"""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO missing_persons (full_name, aadhar, phone_number) VALUES (?, ?, ?)",
-                (full_name, aadhar, phone_number)
+                "INSERT INTO missing_persons (full_name, aadhar, phone_number, photo_path) VALUES (?, ?, ?, ?)",
+                (full_name, aadhar, phone_number, photo_path)
             )
             new_id = cursor.lastrowid
             conn.commit()

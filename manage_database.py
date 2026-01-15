@@ -16,13 +16,14 @@ def add_person():
     full_name = input("Enter full name: ").strip()
     aadhar = input("Enter Aadhar number (optional): ").strip() or None
     phone = input("Enter phone number (optional): ").strip() or None
+    photo_path = input("Enter photo path (optional, e.g., assets/person.jpg): ").strip() or None
     
     conn = sqlite3.connect('life_pulse.db')
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO missing_persons (full_name, aadhar, phone_number, status)
-        VALUES (?, ?, ?, ?)
-    ''', (full_name, aadhar, phone, 'MISSING'))
+        INSERT INTO missing_persons (full_name, aadhar, phone_number, photo_path, status)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (full_name, aadhar, phone, photo_path, ''))
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
@@ -65,20 +66,21 @@ def mark_found():
 def view_all():
     conn = sqlite3.connect('life_pulse.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT id, full_name, aadhar, phone_number, status FROM missing_persons;")
+    cursor.execute("SELECT id, full_name, aadhar, phone_number, photo_path, status FROM missing_persons;")
     rows = cursor.fetchall()
     
     if not rows:
         print("No records found!")
     else:
-        print("\n" + "=" * 80)
+        print("\n" + "=" * 100)
         for row in rows:
             print(f"\nID: {row[0]}")
             print(f"  Full Name: {row[1]}")
             print(f"  Aadhar: {row[2] if row[2] else 'N/A'}")
             print(f"  Phone: {row[3] if row[3] else 'N/A'}")
-            print(f"  Status: {row[4]}")
-        print("=" * 80)
+            print(f"  Photo: {row[4] if row[4] else 'No photo'}")
+            print(f"  Status: {row[5] if row[5] else '(empty)'}")
+        print("=" * 100)
     conn.close()
 
 def search_person():
@@ -87,7 +89,7 @@ def search_person():
     conn = sqlite3.connect('life_pulse.db')
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, full_name, aadhar, phone_number, status FROM missing_persons WHERE full_name LIKE ?;",
+        "SELECT id, full_name, aadhar, phone_number, photo_path, status FROM missing_persons WHERE full_name LIKE ?;",
         (f'%{search_name}%',)
     )
     rows = cursor.fetchall()
@@ -95,14 +97,15 @@ def search_person():
     if not rows:
         print(f"No records found with name containing '{search_name}'")
     else:
-        print("\n" + "=" * 80)
+        print("\n" + "=" * 100)
         for row in rows:
             print(f"\nID: {row[0]}")
             print(f"  Full Name: {row[1]}")
             print(f"  Aadhar: {row[2] if row[2] else 'N/A'}")
             print(f"  Phone: {row[3] if row[3] else 'N/A'}")
-            print(f"  Status: {row[4]}")
-        print("=" * 80)
+            print(f"  Photo: {row[4] if row[4] else 'No photo'}")
+            print(f"  Status: {row[5] if row[5] else '(empty)'}")
+        print("=" * 100)
     conn.close()
 
 import time
