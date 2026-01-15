@@ -1,0 +1,91 @@
+ESP32-CAM SETUP - QUICK GUIDE
+==============================
+
+✅ NEW FILE: ESP32_CAM_WiFi_Upload.ino
+   This code DOES send images to backend via WiFi!
+
+WHAT IT DOES:
+─────────────
+1. Connects to WiFi (Redmi Note 13 Pro 5G)
+2. Listens for 'C' command (Serial Monitor)
+3. Captures image from camera
+4. Uploads to backend: http://192.168.1.100:5000/api/image-upload
+5. Receives and prints response from backend
+6. Shows: "✅ HUMAN DETECTED!" or "❌ No human detected"
+
+UPLOAD TO ESP32:
+────────────────
+1. Open Arduino IDE
+2. Copy entire content from ESP32_CAM_WiFi_Upload.ino
+3. Paste into new Arduino sketch
+4. Select: Board = "AI Thinker ESP32-CAM"
+5. COM Port = your ESP32 port
+6. Upload
+
+⚠️  IMPORTANT - UPDATE THIS LINE:
+──────────────────────────────────
+Line ~17:
+const char* serverUrl = "http://192.168.1.100:5000/api/image-upload";
+
+Change 192.168.1.100 to your BACKEND IP (from backend_server.py output)
+
+USAGE:
+──────
+1. Open Serial Monitor (Tools → Serial Monitor)
+2. Set baud rate to 115200
+3. Type 'C' and press Enter → Image captured & uploaded
+4. Watch for response:
+   - ✅ HUMAN DETECTED! or ✅ MATCH: PersonName
+   - ❌ No human detected
+
+FEATURES:
+──────────
+• Press 'T' → Toggle between QVGA/VGA/SVGA frame sizes
+• Multipart form-data upload (proper HTTP upload)
+• Parses JSON response from backend
+• Shows confidence and matched person name
+
+ERROR FIXES:
+─────────────
+If you see "module cv2.face not found":
+  pip install opencv-contrib-python
+
+If "Cannot connect to backend":
+  - Check backend_server.py is running
+  - Verify WiFi network name/password
+  - Update serverUrl IP address
+  - Both devices on same WiFi network
+
+SUCCESS FLOW:
+──────────────
+Serial Monitor (ESP32):          Backend (Python):        Life-Pulse (Python):
+     │                                 │                         │
+     ├─ "Capturing..."                 │                         │
+     ├─ "Uploading..."                 │                         │
+     │────────────────────► POST /api/image-upload               │
+     │                         │                                  │
+     │                         ├─ Receives JPEG                 │
+     │                         ├─ Face recognition              │
+     │                         ├─ Matches in DB                 │
+     │                         │                                  │
+     │                    ┌────► Returns JSON response ────────► Updates UI
+     │◄───────────────────┘      (human_presence, match)        Graph changes
+     │
+     └─ Prints: "✅ MATCH: Name"
+
+TROUBLESHOOTING:
+─────────────────
+Q: Can't upload sketch to ESP32?
+A: Hold BOOT button while uploading, then release
+
+Q: Serial Monitor shows garbage?
+A: Change baud rate to 115200
+
+Q: "Failed to connect" to WiFi?
+A: Check SSID/password match your WiFi
+
+Q: Image uploaded but no response?
+A: Backend might be offline, check backend_server.py terminal
+
+Q: Response shows "null" for matched_person?
+A: Person not in database, enroll first using manage_database.py

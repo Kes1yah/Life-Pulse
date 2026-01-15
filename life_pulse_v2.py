@@ -13,6 +13,7 @@ Features:
   - Survivor detection with photo display
   - Missing persons database integration
   - "FOUND" status tracking
+  - WiFi image upload to backend for face recognition
 
 Hardware Integration Note:
 --------------------------
@@ -32,6 +33,8 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import Tuple, Optional
 import queue
+import requests
+import json
 
 # GUI imports
 import tkinter as tk
@@ -40,6 +43,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from PIL import Image, ImageTk
+from io import BytesIO
 
 # Local imports
 from database import DisasterDatabase, MissingPerson, WebcamCamera
@@ -926,6 +930,30 @@ class LifePulseGUI:
         # Separator
         ttk.Separator(status_frame, orient="horizontal").pack(fill="x", padx=10, pady=15)
         
+        # Stability Status (for SENTRY mode)
+        stability_frame = tk.Frame(status_frame, bg=self.COLORS['bg_medium'])
+        stability_frame.pack(padx=10, pady=10, fill="x")
+        
+        tk.Label(
+            stability_frame,
+            text="Structural Status:",
+            font=("Helvetica", 10),
+            fg=self.COLORS['text_dim'],
+            bg=self.COLORS['bg_medium']
+        ).pack()
+        
+        self.stability_display = tk.Label(
+            stability_frame,
+            text="STABLE",
+            font=("Helvetica", 14, "bold"),
+            fg=self.COLORS['success'],
+            bg=self.COLORS['bg_medium']
+        )
+        self.stability_display.pack()
+        
+        # Separator
+        ttk.Separator(status_frame, orient="horizontal").pack(fill="x", padx=10, pady=15)
+        
         # Mode toggle button
         self.mode_button = tk.Button(
             status_frame,
@@ -977,7 +1005,7 @@ class LifePulseGUI:
         
         footer_label = tk.Label(
             footer_frame,
-            text="Life-Pulse v2.0 | Mock Sensor Mode | SQLite Database",
+            text="Life-Pulse",
             font=("Helvetica", 8),
             fg=self.COLORS['text_dim'],
             bg=self.COLORS['bg_dark']
@@ -1175,9 +1203,9 @@ class LifePulseGUI:
                 
             # Update plot based on human detection status
             if self.survivor_detected:
-                # Show heart rate signal
+                # Show wave movements
                 self.signal_label.configure(
-                    text="Status: HUMAN DETECTED - Showing Heart Rate",
+                    text="Status: HUMAN DETECTED",
                     fg=self.COLORS['success']
                 )
             else:
@@ -1273,21 +1301,170 @@ class LifePulseGUI:
             self.identifying_in_progress = False
 
     def _identifying_phase(self, photo_path: str):
-        """Stage 2: Analysis / Cross-Verification"""
+        """Stage 2: Analysis / Cross-Verification - Send image to backend"""
         self.current_status = DetectionStatus.IDENTIFYING
         
         # Display captured image in hardware feed area
         self._display_captured_image(photo_path)
         
         self.status_display.configure(
-            text="🔍 DETECTING...\nCROSS-VERIFYING...",
+            text="📤 UPLOADING...\nTO BACKEND...",
             fg=self.COLORS['warning']
         )
         
-        # Simulated "Analysis" delay (3 seconds)
-        # In real life, this is where face-recognition algorithms would run
-        self.root.after(3000, lambda: self._complete_identification(photo_path))
+        # Send image to backend for verification (non-blocking)
+        self.root.after(500, lambda: self._send_image_to_backend(photo_path))
 
+    def _send_image_to_backend(self, photo_path: str):
+        """Send captured image to backend server for face recognition"""
+        try:
+            backend_url = "http://192.168.202.227:5000/api/image-upload"  # Backend IP
+            
+            # Get image from memory or disk
+            if photo_path == "memory://captured_image":
+                captured_frame = self.camera.get_last_captured_frame()
+                if captured_frame is not None:
+                    _, buffer = cv2.imencode('.jpg', captured_frame)
+                    image_bytes = buffer.tobytes()
+                else:
+                    self.status_display.configure(
+                        text="❌ NO IMAGE\nTO SEND",
+                        fg=self.COLORS['danger']
+                    )
+                    return
+            else:
+                with open(photo_path, 'rb') as f:
+                    image_bytes = f.read()
+            
+            # Send to backend
+            files = {'image': ('captured_image.jpg', image_bytes, 'image/jpeg')}
+            response = requests.post(backend_url, files=files, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"[CLIENT] Backend response: {result}")
+                
+                # Update UI based on response
+                if result.get('human_presence'):
+                    self.root.after(0, lambda: self._process_human_detected(result))
+                else:
+                    self.root.after(0, lambda: self._process_no_human_detected())
+            else:
+                self.status_display.configure(
+                    text="⚠️  BACKEND\nERROR",
+                    fg=self.COLORS['danger']
+                )
+                
+        except requests.exceptions.ConnectionError:
+            print("[CLIENT] ❌ Cannot connect to backend. Using local recognition...")
+            self.status_display.configure(
+                text="🔍 LOCAL\nVERIFICATION...",
+                fg=self.COLORS['warning']
+            )
+            self.root.after(2000, lambda: self._complete_identification(photo_path))
+            
+        except Exception as e:
+            print(f"[CLIENT] Error sending image: {e}")
+            self.status_display.configure(
+                text=f"❌ ERROR:\n{str(e)[:20]}",
+                fg=self.COLORS['danger']
+            )
+    
+    def update_sentry_stability(self, compromised: bool):
+        """Update sentry mode structural integrity status"""
+        if compromised:
+            self.stability_display.configure(
+                text="⚠️  COMPROMISED",
+                fg=self.COLORS['danger']
+            )
+            self.status_display.configure(
+                text="🚨 STRUCTURAL\nINTEGRITY\nCOMPROMISED!",
+                fg=self.COLORS['danger']
+            )
+            # Flash warning
+            self.root.configure(bg=self.COLORS['danger'])
+            self.root.after(200, lambda: self.root.configure(bg=self.COLORS['bg_dark']))
+        else:
+            self.stability_display.configure(
+                text="✅ STABLE",
+                fg=self.COLORS['success']
+            )
+            self.status_display.configure(
+                text="MONITORING...\nStable",
+                fg=self.COLORS['success']
+            )
+    
+    def _process_human_detected(self, backend_result: dict):
+        """Process successful human detection from backend"""
+        print(f"[CLIENT] ✅ HUMAN DETECTED from backend")
+        
+        # Switch graph to heart rate display
+        self.survivor_detected = True
+        self.signal_label.configure(
+            text="🫀 Heart Rate Detected (from Backend)",
+            fg=self.COLORS['success']
+        )
+        
+        # Check if matched
+        matched_name = backend_result.get('matched_person')
+        if matched_name:
+            self.status_display.configure(
+                text=f"✅ MATCH FOUND!\n{matched_name}",
+                fg=self.COLORS['success']
+            )
+        else:
+            self.status_display.configure(
+                text="✅ HUMAN DETECTED\n(Not in Database)",
+                fg=self.COLORS['warning']
+            )
+            matched_name = "Unknown Person"
+        
+        self.root.after(3000, lambda: self._complete_identification_with_data(backend_result))
+    
+    def _process_no_human_detected(self):
+        """Process no human detected from backend"""
+        print("[CLIENT] ⚠️  No human detected")
+        self.status_display.configure(
+            text="❌ NO HUMAN\nDETECTED",
+            fg=self.COLORS['danger']
+        )
+        self.survivor_detected = False
+        self.identifying_in_progress = False
+        self.root.after(3000, lambda: self._reset_identification_ui())
+
+    def _complete_identification_with_data(self, backend_result: dict):
+        """Stage 3: Complete identification with backend data"""
+        if not self.survivor_detected:
+            self.identifying_in_progress = False
+            self._reset_identification_ui()
+            return
+        
+        matched_name = backend_result.get('matched_person')
+        person_id = backend_result.get('person_id')
+        
+        if matched_name and person_id:
+            # Get person from database
+            matched_person = self.database.get_person_by_id(person_id)
+            if matched_person:
+                self.current_person = matched_person
+                self.current_status = DetectionStatus.MATCH_FOUND
+                
+                # Update GUI
+                self.name_label.configure(text=f"Name: {matched_name}")
+                self.person_status_label.configure(
+                    text="STATUS: FOUND (VERIFIED)",
+                    fg=self.COLORS['found_green']
+                )
+                
+                # Enable FOUND button
+                self.found_button.configure(
+                    state="normal",
+                    bg=self.COLORS['found_green'],
+                    fg=self.COLORS['bg_dark']
+                )
+        
+        self.identifying_in_progress = False
+    
     def _complete_identification(self, photo_path: str):
         """Stage 3: Match Found & Display"""
         if not self.survivor_detected: # Check if signal still present
