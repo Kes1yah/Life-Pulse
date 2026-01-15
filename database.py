@@ -270,8 +270,16 @@ class WebcamCamera:
         if not os.path.exists(self.assets_dir):
             os.makedirs(self.assets_dir)
             
-    def capture(self, save_path: Optional[str] = None) -> Optional[str]:
-        """Capture a frame from the webcam and save it"""
+    def capture(self, save_path: Optional[str] = None, save_to_disk: bool = True) -> Optional[str]:
+        """Capture a frame from the webcam
+        
+        Args:
+            save_path: Path to save the image (optional)
+            save_to_disk: If False, returns image in memory without saving to disk
+        
+        Returns:
+            Path to saved image if save_to_disk=True, or "memory://captured_image" if save_to_disk=False
+        """
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
             print("Error: Could not open webcam.")
@@ -285,13 +293,23 @@ class WebcamCamera:
         cap.release()
         
         if ret:
-            if save_path is None:
-                save_path = os.path.join(self.assets_dir, f"capture_{int(time.time())}.png")
+            # Store frame in memory for comparison
+            self._last_captured_frame = frame
             
-            cv2.imwrite(save_path, frame)
-            return save_path
+            if save_to_disk:
+                if save_path is None:
+                    save_path = os.path.join(self.assets_dir, f"capture_{int(time.time())}.png")
+                cv2.imwrite(save_path, frame)
+                return save_path
+            else:
+                # Return special marker indicating image is in memory
+                return "memory://captured_image"
             
         return None
+    
+    def get_last_captured_frame(self):
+        """Get the last captured frame from memory"""
+        return getattr(self, '_last_captured_frame', None)
 
     def get_preview_frame(self):
         """Get a single frame for GUI preview"""

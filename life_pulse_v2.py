@@ -707,16 +707,16 @@ class LifePulseGUI:
         self.mode_indicator.grid(row=0, column=2, rowspan=2, padx=20, pady=10)
         
     def _create_image_display_panel(self, parent):
-        """Create image display panel for hardware-captured images"""
-        image_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
-        image_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        image_frame.grid_rowconfigure(0, weight=1)
-        image_frame.grid_columnconfigure(0, weight=1)
+        """Create graph panel for bio-signals (noise/heart rate)"""
+        graph_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
+        graph_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        graph_frame.grid_rowconfigure(0, weight=1)
+        graph_frame.grid_columnconfigure(0, weight=1)
         
         # Title
         title_label = tk.Label(
-            image_frame,
-            text="HARDWARE IMAGE FEED",
+            graph_frame,
+            text="VITAL SIGNALS MONITOR",
             font=("Helvetica", 11, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_medium'],
@@ -725,66 +725,60 @@ class LifePulseGUI:
         )
         title_label.pack(side=tk.TOP)
         
-        # Image display area
-        image_container = tk.Frame(image_frame, bg=self.COLORS['bg_light'], relief=tk.SUNKEN, bd=2)
-        image_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        self.image_label = tk.Label(
-            image_container,
-            text="Waiting for hardware image...",
-            font=("Helvetica", 10),
-            fg=self.COLORS['text_dim'],
-            bg=self.COLORS['bg_light'],
-            width=40,
-            height=15
-        )
-        self.image_label.pack(fill=tk.BOTH, expand=True)
-        
-    def _create_graph_panel(self, parent):
-        """Create graph panel"""
-        graph_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
-        graph_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        graph_frame.grid_rowconfigure(0, weight=1)
-        graph_frame.grid_columnconfigure(0, weight=1)
+        # Graph container
+        graph_container = tk.Frame(graph_frame, bg=self.COLORS['bg_light'], relief=tk.SUNKEN, bd=2)
+        graph_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        graph_container.grid_rowconfigure(0, weight=1)
+        graph_container.grid_columnconfigure(0, weight=1)
         
         # Create matplotlib figure
         self.fig = Figure(figsize=(6, 4), dpi=100, facecolor=self.COLORS['bg_medium'])
         self.ax = self.fig.add_subplot(111)
         self._style_plot()
         
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_frame)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_container)
         self.canvas.draw()
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
         # Initialize plot line
         self.line, = self.ax.plot([], [], color=self.COLORS['graph_line'], linewidth=1)
         
+        # Signal label
+        self.signal_label = tk.Label(
+            graph_frame,
+            text="Status: Waiting for signal...",
+            font=("Helvetica", 9),
+            fg=self.COLORS['text_dim'],
+            bg=self.COLORS['bg_medium']
+        )
+        self.signal_label.pack(pady=(5, 10))
+        
     def _create_person_panel(self, parent):
-        """Create person details panel with photo"""
+        """Create person details panel with captured image"""
         person_frame = tk.Frame(parent, bg=self.COLORS['bg_medium'])
         person_frame.grid(row=0, column=1, sticky="nsew", padx=5)
         
         # Title
         tk.Label(
             person_frame,
-            text="SURVIVOR IDENTIFICATION",
+            text="HARDWARE IMAGE FEED",
             font=("Helvetica", 12, "bold"),
             fg=self.COLORS['text'],
             bg=self.COLORS['bg_medium']
         ).pack(pady=(15, 10))
         
-        # Photo frame
-        photo_container = tk.Frame(person_frame, bg=self.COLORS['bg_light'], padx=5, pady=5)
-        photo_container.pack(padx=10, pady=5)
+        # Image frame - for captured hardware image
+        image_container = tk.Frame(person_frame, bg=self.COLORS['bg_light'], padx=5, pady=5, relief=tk.SUNKEN, bd=2)
+        image_container.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
         
         self.photo_label = tk.Label(
-            photo_container,
-            text="No Photo",
+            image_container,
+            text="Waiting for hardware image...",
             font=("Helvetica", 10),
             fg=self.COLORS['text_dim'],
-            bg=self.COLORS['bg_dark'],
-            width=15,
-            height=8
+            bg=self.COLORS['bg_light'],
+            width=20,
+            height=12
         )
         self.photo_label.pack()
         
@@ -983,7 +977,7 @@ class LifePulseGUI:
         
         footer_label = tk.Label(
             footer_frame,
-            text="Life-Pulse v2.0 | Raspberry Pi 5 | Mock Sensor Mode | SQLite Database",
+            text="Life-Pulse v2.0 | Mock Sensor Mode | SQLite Database",
             font=("Helvetica", 8),
             fg=self.COLORS['text_dim'],
             bg=self.COLORS['bg_dark']
@@ -1005,6 +999,39 @@ class LifePulseGUI:
         self.ax.set_xlim(0, self.config.buffer_size * 4)
         self.ax.set_ylim(-5, 5)
         
+    def _display_captured_image(self, photo_path: str):
+        """Display captured image in the hardware image feed area"""
+        try:
+            captured_frame = None
+            
+            # Get image from memory or disk
+            if photo_path == "memory://captured_image":
+                captured_frame = self.camera.get_last_captured_frame()
+            else:
+                if os.path.exists(photo_path):
+                    captured_frame = cv2.imread(photo_path)
+            
+            if captured_frame is not None:
+                # Convert BGR to RGB for PIL
+                frame_rgb = cv2.cvtColor(captured_frame, cv2.COLOR_BGR2RGB)
+                
+                # Resize for display in image_label (approx 400x300)
+                frame_resized = cv2.resize(frame_rgb, (400, 300))
+                
+                # Convert to PIL Image
+                img = Image.fromarray(frame_resized)
+                
+                # Convert to PhotoImage
+                self.captured_image = ImageTk.PhotoImage(img)
+                
+                # Display in hardware image feed area
+                self.image_label.configure(image=self.captured_image, text="")
+                self.image_label.image = self.captured_image
+                
+        except Exception as e:
+            print(f"Error displaying captured image: {e}")
+            self.image_label.configure(text=f"Image Error: {str(e)[:30]}")
+    
     def _load_photo(self, photo_path: str):
         """Load and display person photo"""
         try:
@@ -1139,9 +1166,38 @@ class LifePulseGUI:
     def _update_gui(self):
         """Update GUI with latest data (runs in main thread)"""
         try:
-            # Get latest signal data (discard for now, we're not displaying graph)
+            # Get latest signal data
             while not self.data_queue.empty():
                 new_data = self.data_queue.get_nowait()
+                # Shift buffer and append new data
+                self.signal_buffer = np.roll(self.signal_buffer, -len(new_data))
+                self.signal_buffer[-len(new_data):] = new_data
+                
+            # Update plot based on human detection status
+            if self.survivor_detected:
+                # Show heart rate signal
+                self.signal_label.configure(
+                    text="Status: HUMAN DETECTED - Showing Heart Rate",
+                    fg=self.COLORS['success']
+                )
+            else:
+                # Show noise
+                self.signal_label.configure(
+                    text="Status: Ambient Noise (No Human)",
+                    fg=self.COLORS['text_dim']
+                )
+            
+            # Update plot
+            x_data = np.arange(len(self.signal_buffer))
+            self.line.set_data(x_data, self.signal_buffer)
+            self.ax.set_xlim(0, len(self.signal_buffer))
+            
+            # Auto-scale Y axis based on data
+            data_range = np.max(np.abs(self.signal_buffer))
+            if data_range > 0:
+                self.ax.set_ylim(-data_range * 1.2, data_range * 1.2)
+            
+            self.canvas.draw_idle()
             
             # Get latest detection results
             while not self.result_queue.empty():
@@ -1202,8 +1258,8 @@ class LifePulseGUI:
             fg=self.COLORS['accent']
         )
         
-        # Trigger "Hardware" capture
-        captured_path = self.camera.capture()
+        # Trigger "Hardware" capture (keep in memory, don't save to assets folder)
+        captured_path = self.camera.capture(save_to_disk=False)
         
         if captured_path:
             # Move to Stage 2 after short delay
@@ -1219,6 +1275,9 @@ class LifePulseGUI:
     def _identifying_phase(self, photo_path: str):
         """Stage 2: Analysis / Cross-Verification"""
         self.current_status = DetectionStatus.IDENTIFYING
+        
+        # Display captured image in hardware feed area
+        self._display_captured_image(photo_path)
         
         self.status_display.configure(
             text="🔍 DETECTING...\nCROSS-VERIFYING...",
@@ -1311,8 +1370,17 @@ class LifePulseGUI:
                 
             recognizer.train(faces, np.array(labels))
             
-            # Detect face in capture
-            captured_img = cv2.imread(captured_photo_path)
+            # Detect face in capture - handle both file path and in-memory image
+            if captured_photo_path == "memory://captured_image":
+                # Get image from camera memory
+                captured_img = self.camera.get_last_captured_frame()
+            else:
+                # Read from file path
+                captured_img = cv2.imread(captured_photo_path)
+            
+            if captured_img is None:
+                return None
+                
             gray = cv2.cvtColor(captured_img, cv2.COLOR_BGR2GRAY)
             gray = cv2.equalizeHist(gray) # Better contrast
             
