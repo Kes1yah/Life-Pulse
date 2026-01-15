@@ -9,13 +9,13 @@ import numpy as np
 
 @dataclass
 class MissingPerson:
-    """Simplified model for a missing person"""
+    """Model for a missing person with full details"""
     id: int
-    name: str
-    photo_path: str
-    status: str = "MISSING"
+    full_name: str
+    aadhar: Optional[str] = None
+    phone_number: Optional[str] = None
+    status: str = ""  # Empty by default, updated only when found by hardware device
     found_timestamp: Optional[float] = None
-    face_encoding: Optional[bytes] = None
 
 class DisasterDatabase:
     """
@@ -40,15 +40,15 @@ class DisasterDatabase:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Create missing_persons table (simplified)
+            # Create missing_persons table with new schema
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS missing_persons (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    photo_path TEXT,
-                    status TEXT DEFAULT 'MISSING',
-                    found_timestamp REAL,
-                    face_encoding BLOB
+                    full_name TEXT NOT NULL,
+                    aadhar TEXT,
+                    phone_number TEXT,
+                    status TEXT DEFAULT '',
+                    found_timestamp REAL
                 )
             ''')
             
@@ -77,14 +77,14 @@ class DisasterDatabase:
             conn.commit()
             conn.close()
             
-    def add_person(self, name: str, photo_path: str) -> int:
+    def add_person(self, full_name: str, aadhar: str = None, phone_number: str = None) -> int:
         """Add a new person to the missing list"""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO missing_persons (name, photo_path) VALUES (?, ?)",
-                (name, photo_path)
+                "INSERT INTO missing_persons (full_name, aadhar, phone_number) VALUES (?, ?, ?)",
+                (full_name, aadhar, phone_number)
             )
             new_id = cursor.lastrowid
             conn.commit()
